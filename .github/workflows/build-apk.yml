@@ -17,7 +17,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android
+          targets: armv7-linux-androideabi
 
       - uses: taiki-e/install-action@v2
         with:
@@ -39,13 +39,14 @@ jobs:
           APP="$ROOT/apps/notes"
           KIT="$ROOT/crates/heartnet-kit"
           LIB=notes
+          ABI=armeabi-v7a
           OUT="$ROOT/out"
           mkdir -p "$OUT/classes" "$OUT/dex" "$OUT/jni"
 
           echo "== rust"
           cd "$APP"
-          cargo ndk -t arm64-v8a --platform 30 -o "$OUT/jni" build --release --lib
-          test -f "$OUT/jni/arm64-v8a/lib$LIB.so"
+          cargo ndk -t $ABI --platform 30 -o "$OUT/jni" build --release --lib
+          test -f "$OUT/jni/$ABI/lib$LIB.so"
 
           echo "== java"
           find "$KIT/java" -name '*.java' > "$OUT/sources.txt"
@@ -60,10 +61,9 @@ jobs:
           "$BT/aapt2" link -o "$OUT/base.apk" -I "$JAR" --manifest "$APP/android/AndroidManifest.xml" \
             --min-sdk-version 30 --target-sdk-version 34 --version-code "$CODE" --version-name "1.0.$GITHUB_RUN_NUMBER" "$OUT/res.zip"
 
-          cp "$OUT/dex/classes.dex" "$OUT/classes.dex"
-          mkdir -p "$OUT/pkg/lib/arm64-v8a"
-          cp "$OUT/classes.dex" "$OUT/pkg/"
-          cp "$OUT/jni/arm64-v8a/lib$LIB.so" "$OUT/pkg/lib/arm64-v8a/"
+          mkdir -p "$OUT/pkg/lib/$ABI"
+          cp "$OUT/dex/classes.dex" "$OUT/pkg/"
+          cp "$OUT/jni/$ABI/lib$LIB.so" "$OUT/pkg/lib/$ABI/"
           (cd "$OUT/pkg" && zip -q "$OUT/base.apk" classes.dex && zip -q -0 -r "$OUT/base.apk" lib)
 
           echo "== align + sign"
