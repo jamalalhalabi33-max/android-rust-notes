@@ -17,37 +17,68 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+          targets: aarch64-linux-android
 
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-ndk
 
-      - name: Install Android platform
+      - name: Install Android platform and build-tools
         run: |
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-30" "platforms;android-33" "platforms;android-34" "build-tools;34.0.0"
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" "platforms;android-34" "build-tools;34.0.0"
 
-      - name: Build debug APK
+      - name: Build APK
         run: |
+          set -euo pipefail
           export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$ANDROID_NDK_LATEST_HOME}"
-          export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
-          GW=$(find . -name gradlew -not -path "*/target/*" | head -n1)
-          if [ -n "$GW" ]; then
-            cd "$(dirname "$GW")"
-            chmod +x gradlew
-            ./gradlew assembleDebug --no-daemon --stacktrace
-          else
-            cargo install cargo-apk --locked
-            cd apps/notes
-            cargo apk build
-          fi
+          BT="$ANDROID_HOME/build-tools/34.0.0"
+          JAR="$ANDROID_HOME/platforms/android-34/android.jar"
+          ROOT="$GITHUB_WORKSPACE"
+          APP="$ROOT/apps/notes"
+          KIT="$ROOT/crates/heartnet-kit"
+          LIB=notes
+          OUT="$ROOT/out"
+          mkdir -p "$OUT/classes" "$OUT/dex" "$OUT/jni"
+
+          echo "== rust"
+          cd "$APP"
+          cargo ndk -t arm64-v8a --platform 30 -o "$OUT/jni" build --release --lib
+          test -f "$OUT/jni/arm64-v8a/lib$LIB.so"
+
+          echo "== java"
+          find "$KIT/java" -name '*.java' > "$OUT/sources.txt"
+          if [ -d "$APP/android/java" ]; then find "$APP/android/java" -name '*.java' >> "$OUT/sources.txt"; fi
+          javac -source 8 -target 8 -bootclasspath "$JAR" -Xlint:-options -d "$OUT/classes" @"$OUT/sources.txt"
+          find "$OUT/classes" -name '*.class' > "$OUT/classlist.txt"
+          "$BT/d8" --lib "$JAR" --min-api 30 --output "$OUT/dex" @"$OUT/classlist.txt"
+
+          echo "== manifest + package"
+          CODE=$((16777472 + GITHUB_RUN_NUMBER))
+          "$BT/aapt2" compile --dir "$APP/android/res" -o "$OUT/res.zip"
+          "$BT/aapt2" link -o "$OUT/base.apk" -I "$JAR" --manifest "$APP/android/AndroidManifest.xml" \
+            --min-sdk-version 30 --target-sdk-version 34 --version-code "$CODE" --version-name "1.0.$GITHUB_RUN_NUMBER" "$OUT/res.zip"
+
+          cp "$OUT/dex/classes.dex" "$OUT/classes.dex"
+          mkdir -p "$OUT/pkg/lib/arm64-v8a"
+          cp "$OUT/classes.dex" "$OUT/pkg/"
+          cp "$OUT/jni/arm64-v8a/lib$LIB.so" "$OUT/pkg/lib/arm64-v8a/"
+          (cd "$OUT/pkg" && zip -q "$OUT/base.apk" classes.dex && zip -q -0 -r "$OUT/base.apk" lib)
+
+          echo "== align + sign"
+          "$BT/zipalign" -f -p 4 "$OUT/base.apk" "$OUT/aligned.apk"
+          keytool -genkeypair -keystore "$OUT/debug.keystore" -storepass android -keypass android \
+            -alias debugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Debug,O=Debug,C=US"
+          mkdir -p "$APP/target"
+          "$BT/apksigner" sign --ks "$OUT/debug.keystore" --ks-pass pass:android --key-pass pass:android \
+            --out "$APP/target/$LIB.apk" "$OUT/aligned.apk"
+          "$BT/apksigner" verify "$APP/target/$LIB.apk"
+          ls -lh "$APP/target/$LIB.apk"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: debug-apk
-          path: |
-            **/build/outputs/apk/debug/*.apk
-            **/target/debug/apk/*.apk
+          path: apps/notes/target/notes.apk
           if-no-files-found: error
